@@ -5,7 +5,6 @@ import (
 	"sort"
 	log "github.com/Sirupsen/logrus"
 	"fmt"
-	"github.com/git-lfs/git-lfs/errors"
 	"io"
 	"os"
 )
@@ -25,11 +24,16 @@ type StreamReader struct {
 
 type OutOfFiles struct {
 	error
+	message string
 }
 
 func (r *StreamReader) Read(p []byte) (n uint64, err error) {
 	if r.currentFile == nil || r.currentPtr == r.currentSize {
-		r.openNextFile()
+		err:=r.openNextFile()
+		if err != nil{
+			return 0, err
+		}
+
 	}
 
 	//copy bytes until we're done
@@ -37,11 +41,13 @@ func (r *StreamReader) Read(p []byte) (n uint64, err error) {
 	bufflen := uint64(len(p))
 	toRead := bufflen
 	for {
-		size := toRead - (r.currentSize - r.currentPtr)
-		if size < 0 {
+		diff:=r.currentSize - r.currentPtr
+		if toRead > diff {
 			//will read past this file, copy all and load the next file
+			log.Debugf("Reading from file")
+			log.Debugf("r.currentFile[%v:%v]", r.currentPtr,r.currentSize)
 			amtRead := uint64(r.currentSize - r.currentPtr)
-			copy(r.currentFile[r.currentPtr:r.currentSize], p[bytesRead:])
+			copy(r.currentFile, p[bytesRead:])
 			bytesRead += amtRead
 			toRead -= amtRead
 			err := r.openNextFile()
@@ -55,6 +61,8 @@ func (r *StreamReader) Read(p []byte) (n uint64, err error) {
 			}
 		} else {
 			//the current file is enough, read in what is needed and move the pointer
+			log.Debugf("Reading from file")
+			log.Debugf("r.currentFile[%v:%v]", r.currentPtr,(r.currentSize - toRead))
 			copy(r.currentFile[r.currentPtr:(r.currentSize - toRead)], p[bytesRead:])
 			r.currentPtr += toRead
 			break
@@ -92,7 +100,7 @@ func (r *StreamReader) Skip(amount uint64) (uint64, error) {
 
 func (r *StreamReader) openNextFile() error {
 	if r.currentFileIndex >= len(r.filenames) {
-		return OutOfFiles{}
+		return OutOfFiles{message:"OUT"}
 	}
 
 	file, err := os.Open(r.filenames[r.currentFileIndex])
@@ -133,16 +141,17 @@ func NewStreamReader(streamId string) (*StreamReader, error) {
 
 	//find all files in the stream
 	dir := fmt.Sprintf("%s/%s/%s", storage_dir, inflight_dir, streamId)
+	log.Debugf("Opening all files in %s",dir)
 	files, err := ioutil.ReadDir(dir)
 	if err != nil {
 		log.Errorf("Could not process stream %v", streamId)
-		return nil, errors.New("Could not process stream")
+		return nil, err
 	}
 
 	//order the files by name to reconstruct stream in correct order
 	reader.filenames = make([]string, len(files))
 	for i, f := range files {
-		reader.filenames[i] = f.Name()
+		reader.filenames[i] = fmt.Sprintf("%s/%s",dir,f.Name())
 		reader.TotalSize += uint64(f.Size())
 	}
 	sort.Strings(reader.filenames)
