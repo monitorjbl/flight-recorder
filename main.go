@@ -54,9 +54,14 @@ func dumpPayload(streamId *string, seqId *uint32, data *[]byte) {
 		os.MkdirAll(dir, 0755)
 		inflight.SetIfAbsent(*streamId, time.Now())
 	}
-	file:=fmt.Sprintf("%s/%v", dir, *seqId)
-	log.Infof("Writing %v bytes to ", file)
-	ioutil.WriteFile(file, *data, 0644)
+
+	if data != nil && len(*data) > 0 {
+		file := fmt.Sprintf("%s/%v", dir, *seqId)
+		log.Infof("Writing %v bytes to ", file)
+		ioutil.WriteFile(file, *data, 0644)
+	} else {
+		log.Debugf("Skipping empty payload for %v: %v", dir, *data)
+	}
 }
 
 func handlePacket(ip *layers.IPv4, tcp *layers.TCP) {
@@ -64,14 +69,12 @@ func handlePacket(ip *layers.IPv4, tcp *layers.TCP) {
 	streamId := fmt.Sprintf("%v_%d-%v_%d", ip.SrcIP, tcp.SrcPort, ip.DstIP, tcp.DstPort)
 
 	if tcp.FIN {
-		fmt.Printf("CLOSE  %v: %d\n", streamId, tcp.Seq)
+		log.Infof("Connection from %v to %v is closed", ip.SrcIP, ip.DstIP)
 		inflight.Remove(streamId)
-		go transmogrify(streamId)
+		transmogrify(streamId)
 	} else {
-		if tcp.Payload != nil && len(tcp.Payload) > 0 {
-			fmt.Printf("WRITE %v/%d\n", streamId, tcp.Seq)
-			dumpPayload(&streamId, &tcp.Seq, &tcp.Payload)
-		}
+		log.Debugf("Dumping packet from %v", ip.SrcIP)
+		dumpPayload(&streamId, &tcp.Seq, &tcp.Payload)
 	}
 }
 
@@ -86,37 +89,70 @@ func main() {
 	}
 	defer handle.Close()
 
+	if err := handle.SetBPFFilter("tcp"); err != nil {
+		log.Fatalf("Could not set tcp filter")
+		return
+	}
+
 	// Use the handle as a packet source to process all packets
-	packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
-	skipTraffic := false
-	skipMark := int64(0)
-	for packet := range packetSource.Packets() {
-		if skipTraffic {
-			if time.Now().Unix() >= (skipMark + sleeptime) {
-				skipTraffic = false
-				log.Infof("Resuming traffic inspection")
-			} else {
-				continue
-			}
+	//skipTraffic := false
+	//skipMark := int64(0)
+
+	var eth layers.Ethernet
+	var ip4 layers.IPv4
+	var ip6 layers.IPv6
+	var tcp layers.TCP
+	parser := gopacket.NewDecodingLayerParser(layers.LayerTypeEthernet, &eth, &ip4, &ip6, &tcp)
+	decoded := []gopacket.LayerType{}
+	for {
+		data, _, err := handle.ZeroCopyReadPacketData()
+		if err != nil {
+			log.Fatalf("Could not get packet: %v", err)
+			break
 		}
 
-		// Get source IP
-		ipLayer := packet.Layer(layers.LayerTypeIPv4)
-		if ipLayer == nil {
-			continue
-		}
-		ip := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
-
-		if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
-			tcp, _ := tcpLayer.(*layers.TCP)
-			if threadcount < threadcap {
-				atomic.AddInt64(&threadcount, 1)
-				go handlePacket(ip, tcp)
-			} else {
-				log.Warnf("Reached threadlimit of %v, ignoring traffic for %v seconds", threadcap, sleeptime)
-				skipMark = time.Now().Unix()
-				skipTraffic = true
+		err = parser.DecodeLayers(data, &decoded)
+		for _, layerType := range decoded {
+			switch layerType {
+			case layers.LayerTypeTCP:
+				handlePacket(&ip4, &tcp)
 			}
 		}
 	}
+
+
+	//
+	//// Use the handle as a packet source to process all packets
+	//packetSource := gopacket.NewPacketSource(handle, handle.LinkType())
+	//skipTraffic := false
+	//skipMark := int64(0)
+	//for packet := range packetSource.Packets() {
+	//	if skipTraffic {
+	//		if time.Now().Unix() >= (skipMark + sleeptime) {
+	//			skipTraffic = false
+	//			log.Infof("Resuming traffic inspection")
+	//		} else {
+	//			continue
+	//		}
+	//	}
+	//
+	//	// Get source IP
+	//	ipLayer := packet.Layer(layers.LayerTypeIPv4)
+	//	if ipLayer == nil {
+	//		continue
+	//	}
+	//	ip := packet.Layer(layers.LayerTypeIPv4).(*layers.IPv4)
+	//
+	//	if tcpLayer := packet.Layer(layers.LayerTypeTCP); tcpLayer != nil {
+	//		tcp, _ := tcpLayer.(*layers.TCP)
+	//		if threadcount < threadcap {
+	//			atomic.AddInt64(&threadcount, 1)
+	//			handlePacket(ip, tcp)
+	//		} else {
+	//			log.Warnf("Reached threadlimit of %v, ignoring traffic for %v seconds", threadcap, sleeptime)
+	//			skipMark = time.Now().Unix()
+	//			skipTraffic = true
+	//		}
+	//	}
+	//}
 }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	log "github.com/Sirupsen/logrus"
+	"io"
 )
 
 func httpStartLine(line *string) HttpEvent {
@@ -58,6 +59,9 @@ func transmogrify(streamId string) {
 	for {
 		bytesRead, err := reader.Read(buffer)
 		if err != nil {
+			if err == io.EOF {
+				break
+			}
 			log.Errorf("Error reading packet data: %v", err)
 			return
 		}
